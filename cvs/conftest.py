@@ -20,8 +20,9 @@ def _maybe_autocollect_html(config, suite_name):
     Enable pytest-html for ANC suites without an explicit --html.
 
     When the ANC config has COLLECT_HTML_REPORTS truthy (default) and the user
-    did not pass --html on the command line, resolve anc.html_report_path and set
-    config.option.htmlpath so pytest-html generates the report anyway. Runs at
+    did not pass --html on the command line, derive the report path from
+    anc.log_folder_path and set config.option.htmlpath so pytest-html generates
+    the report anyway. Runs at
     tryfirst pytest_configure time (before pytest-html's own configure and before
     HtmlReportManager reads config.option.htmlpath). An explicit --html always
     wins. Best-effort: any failure leaves HTML reporting exactly as the command

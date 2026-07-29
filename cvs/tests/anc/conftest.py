@@ -23,6 +23,7 @@ from cvs.lib.utils_lib import (
     resolve_test_config_placeholders,
 )
 from cvs.lib import globals
+from cvs.lib import anc_lib
 
 log = globals.log
 
@@ -66,18 +67,45 @@ def cluster_dict(cluster_file):
 
 
 @pytest.fixture(scope="module")
-def config_dict(config_file, cluster_dict):
+def config_dict(config_file, cluster_dict, pytestconfig):
     '''
     Load and resolve the ANC test configuration from JSON.
 
     Placeholders such as {home} are resolved using cluster_dict
     (e.g. cvs_home "{home}/cvs" -> "/home/<user>/cvs").
+
+    Fails the run up front (before any ANC command runs) on config problems:
+
+      - ANY field still left at the REPLACE_ME sentinel (e.g. anc_release_url,
+        log_folder_path) aborts every ANC suite, including install-only runs.
+      - anc.log_folder_path additionally must be present and non-blank for the
+        group suites (anc_test_*), which write logs + the HTML report under it;
+        the install-only suite does not need it.
+
+    Failing here (fixture setup) means a bad config costs seconds, not a full
+    suite run on the nodes.
     '''
     with open(config_file) as json_file:
         config_dict = json.load(json_file)
 
     config_dict = resolve_test_config_placeholders(config_dict, cluster_dict)
     log.info("ANC test config: %s", config_dict)
+
+    suite_name = getattr(pytestconfig, "_suite_name", "") or ""
+    if suite_name.startswith("anc") and "anc" in config_dict:
+        problems = []
+        # Broad: any leftover REPLACE_ME placeholder anywhere in the config.
+        placeholders = anc_lib.find_replace_me_placeholders(config_dict)
+        problems += [f'{p} is still "{anc_lib.REPLACE_ME_SENTINEL}"' for p in placeholders]
+        # Group suites additionally require a usable log_folder_path prefix.
+        if suite_name.startswith("anc_test"):
+            problems += anc_lib.validate_anc_path_prefixes(config_dict)
+        if problems:
+            pytest.fail(
+                "ANC config error (fix before running): " + "; ".join(problems),
+                pytrace=False,
+            )
+
     return config_dict
 
 

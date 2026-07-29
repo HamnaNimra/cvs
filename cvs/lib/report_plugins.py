@@ -36,6 +36,9 @@ class HtmlReportManager:
         self._test_html_dir = getattr(config, "_test_html_dir", "test_html")
         self._custom_test_reports = []  # Track reports added via add_html_to_report
         self._config_files = {}  # Track copied config files {original_path: relative_path}
+        # Per-test PASS/FAIL verdict lines rendered in the Reports section.
+        # Each entry: {"name": test_name, "passed": bool, "detail": str}.
+        self._anc_verdicts = []
 
         # Store reference for access from pytest hooks
         HtmlReportManager._current_instance = self
@@ -124,13 +127,19 @@ class HtmlReportManager:
 
         return extras
 
-    def add_html_to_report(self, html_file, link_name=None, request=None):
-        """Copy an external HTML file to the report directory for inclusion in ZIP bundle.
+    def add_html_to_report(self, html_file, link_name=None, request=None, dest_name=None, track_in_reports=True):
+        """Copy an external file into the report directory for inclusion in the ZIP bundle.
 
         Args:
-            html_file (str or Path): Path to the HTML file to include in the report
+            html_file (str or Path): Path to the file to include in the report
             link_name (str, optional): If provided, adds a clickable link in the pytest-html report
             request (pytest request fixture, optional): Required if link_name is provided
+            dest_name (str, optional): Filename to copy to inside the report dir. Defaults to the
+                source filename. Use a unique name (e.g. "<node>_<test>_<ts>_errors.json") to avoid
+                one node's artifact overwriting another's when several land in the same directory.
+            track_in_reports (bool): When True (default) the file is listed in the Reports section
+                bullet list. Set False for per-row artifacts (errors.json, per-node ANC tarballs)
+                that are already linked from the results table and would clutter Reports.
 
         Returns:
             str: Relative path to the copied file (for linking), or None if copying failed
@@ -142,29 +151,30 @@ class HtmlReportManager:
         try:
             source_path = Path(html_file)
             if not source_path.exists():
-                log.warning("HTML file not found, cannot add to report: %s", source_path)
+                log.warning("File not found, cannot add to report: %s", source_path)
                 return None
 
             # Ensure log directory exists
             self.log_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy file to log directory with same name
-            dest_path = self.log_dir / source_path.name
+            # Copy file to log directory (optionally under a caller-supplied unique name)
+            dest_path = self.log_dir / (dest_name or source_path.name)
             shutil.copy2(source_path, dest_path)
 
-            log.info("Added HTML file to report bundle: %s -> %s", source_path, dest_path)
+            log.info("Added file to report bundle: %s -> %s", source_path, dest_path)
 
             # Return relative path for potential linking
             rel_path = dest_path.relative_to(self.htmlpath.parent)
             rel_path_str = str(rel_path)
 
-            # Track the added report
-            report_info = {
-                'name': link_name or source_path.name,
-                'path': rel_path_str,
-                'original_path': str(source_path),
-            }
-            self._custom_test_reports.append(report_info)
+            # Track the added report (unless it's a per-row artifact linked elsewhere)
+            if track_in_reports:
+                report_info = {
+                    'name': link_name or source_path.name,
+                    'path': rel_path_str,
+                    'original_path': str(source_path),
+                }
+                self._custom_test_reports.append(report_info)
 
             # Add clickable link to pytest-html report if requested
             if link_name and request:
@@ -351,19 +361,56 @@ class HtmlReportManager:
         else:
             data.append("<div class='empty log'>Log externalized (see link above).</div>")
 
+    def record_anc_verdict(self, test_name, passed, detail=""):
+        """Record a per-test PASS/FAIL verdict for the Reports section.
+
+        Args:
+            test_name (str): The test function name (e.g. "test_cpu_all").
+            passed (bool): True if the test passed on every node.
+            detail (str): On pass, the node list ("PASS on all nodes [...]"); on fail,
+                which node(s) failed and a short reason.
+        """
+        self._anc_verdicts.append({"name": test_name, "passed": bool(passed), "detail": detail})
+
+    @staticmethod
+    def _escape(text):
+        """Minimal HTML escaping for text injected into the Reports section."""
+        import html as _html
+
+        return _html.escape(str(text), quote=True)
+
     def generate_reports_section(self):
-        """Generate HTML for the Reports section showing added HTML reports only."""
-        if not self._custom_test_reports:
+        """Generate HTML for the Reports section.
+
+        Renders the per-test PASS/FAIL verdict lines first (green/red), then keeps the
+        existing bullet list of attached report artifacts (e.g. ANC log tarballs).
+        """
+        if not self._anc_verdicts and not self._custom_test_reports:
             return ""
 
-        # Simple Reports section - only test reports, no config files
-        html = '<div><h2>Reports</h2><ul>'
+        html = '<div><h2>Reports</h2>'
 
-        # Add test reports only
-        for report in self._custom_test_reports:
-            html += f'<li><a href="{report["path"]}" target="_blank">{report["name"]}</a></li>'
+        # Per-test verdicts: green "PASS" line or red "FAILED" line.
+        if self._anc_verdicts:
+            html += '<ul>'
+            for v in self._anc_verdicts:
+                if v["passed"]:
+                    status = '<span style="color:#2e7d32;font-weight:bold;">PASS</span>'
+                else:
+                    status = '<span style="color:#c62828;font-weight:bold;">FAILED</span>'
+                name = self._escape(v["name"])
+                detail = f' &mdash; {self._escape(v["detail"])}' if v["detail"] else ''
+                html += f'<li>{name}: {status}{detail}</li>'
+            html += '</ul>'
 
-        html += '</ul></div>'
+        # Attached artifacts (e.g. per-node ANC log tarballs) kept as before.
+        if self._custom_test_reports:
+            html += '<ul>'
+            for report in self._custom_test_reports:
+                html += f'<li><a href="{report["path"]}" target="_blank">{report["name"]}</a></li>'
+            html += '</ul>'
+
+        html += '</div>'
 
         return html
 

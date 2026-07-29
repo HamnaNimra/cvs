@@ -133,8 +133,7 @@ The ANC config lives at `cvs/input/config_file/anc/anc_config.json`:
         "print_all_to_console": "True",
         "log_folder_path": "/home/user/cvs_logs",
         "ADD_ANC_LOGS_TO_HTML_REPORTS": "False",
-        "COLLECT_HTML_REPORTS": "True",
-        "html_report_path": "/home/user/cvs_logs"
+        "COLLECT_HTML_REPORTS": "True"
     }
 }
 ```
@@ -150,16 +149,17 @@ Each key is documented inline in the shipped config via a matching
 | `anc_release_url` | ANC release archive URL (used by `anc_installation`). Flavour (deb/rpm/tar) is auto-detected from the filename. |
 | `cvs_home` | Staging dir on each node for the release download/unpack (tar flavour). `{home}` resolves to the SSH user's home. ANC itself always installs to `/opt/amdtools/anc`. |
 | `print_all_to_console` | `True` echoes ANC group output to console; `False` suppresses it (diagnostics still print). |
-| `log_folder_path` | Controller-side destination **prefix** for collected logs. A plain directory path (leading `~` expanded); **required** — replace the shipped `REPLACE_ME`. CVS appends its own fixed `anc_logs/<node>/<test_name>/<timestamp>` structure under it (`<node>` → the node's `<ip>_<hostname>` label, `<test_name>` → the group's test name, `<timestamp>` → per-run stamp). |
-| `ADD_ANC_LOGS_TO_HTML_REPORTS` | `True` always bundles the collected ANC log tree (as a `.tar.gz` with a clickable link) into the pytest-html report zip. `False` (default) bundles it **only when the test fails**. |
-| `COLLECT_HTML_REPORTS` | `True` (default) auto-generates a pytest-html report even when no `--html` is passed, written under `html_report_path`. `False` disables auto-collection. An explicit `--html` on the command line always overrides `html_report_path`. |
-| `html_report_path` | Destination **prefix** for the auto-collected report; **required** — replace the shipped `REPLACE_ME`. CVS appends `html_reports/<node>/<test_name>/<timestamp>/` under it and places `<test_name>.html` inside. Since pytest-html makes one report per session before any node connects, `<node>` here is the **first** cluster node (label from the cluster file only, no SSH). |
+| `log_folder_path` | Controller-side destination **prefix** for **all** ANC artifacts — collected logs and the auto-collected HTML report. A plain directory path (leading `~` expanded); **required** — replace the shipped `REPLACE_ME`. CVS appends its own fixed structure under it: logs at `anc_logs/<node>/<test_name>/<timestamp>` and the report at `html_reports/<node>/<test_name>/<timestamp>/<test_name>.html` (`<node>` → the node's `<ip>_<hostname>` label, `<test_name>` → the group's test name, `<timestamp>` → per-run stamp). |
+| `ADD_ANC_LOGS_TO_HTML_REPORTS` | Governs the per-node **ANC logs** tarball links. `True` always bundles each node's collected log tree (one `.tar.gz` + link per node) into the pytest-html report zip. `False` (default) bundles them **only when the test fails**. The per-node `errors.json` links appear regardless of this flag. |
+| `COLLECT_HTML_REPORTS` | `True` (default) auto-generates a pytest-html report even when no `--html` is passed, written under `log_folder_path`. `False` disables auto-collection. An explicit `--html` on the command line always overrides the auto-collected path. |
 
-`log_folder_path` and `html_report_path` are plain directory prefixes (they do
-**not** accept `{home}`/`{runner_log_folder}` tokens). With a `log_folder_path`
-of `/home/user/cvs_logs`, logs land at
-`/home/user/cvs_logs/anc_logs/<node>/<test_name>/<timestamp>`, where `<node>` is
-that node's `<ip>_<hostname>` label.
+`log_folder_path` is a plain directory prefix (it does **not** accept
+`{home}`/`{runner_log_folder}` tokens). With a `log_folder_path` of
+`/home/user/cvs_logs`, logs land at
+`/home/user/cvs_logs/anc_logs/<node>/<test_name>/<timestamp>` and the HTML report
+at `/home/user/cvs_logs/html_reports/<node>/<test_name>/<timestamp>/<test_name>.html`,
+where `<node>` is that node's `<ip>_<hostname>` label. To send the report
+elsewhere, pass `--html` on the command line.
 
 ---
 
@@ -313,15 +313,29 @@ Collected files:
 
 A pytest-html report is produced whenever `--html` is passed **or**
 `COLLECT_HTML_REPORTS` is `True` (the default) — in the latter case the report is
-written automatically to `html_report_path` with no `--html` needed. An explicit
-`--html` always overrides `html_report_path`. Each group's collected ANC log tree
-can also be bundled into the report zip as a single `.tar.gz` with a clickable
-**"ANC logs: <test>"** link, controlled by `ADD_ANC_LOGS_TO_HTML_REPORTS`:
+written automatically under `log_folder_path` (at
+`html_reports/<node>/<test_name>/<timestamp>/<test_name>.html`) with no `--html`
+needed. An explicit `--html` always overrides that auto-collected path.
 
-- `True` — always attach (pass or fail).
-- `False` (default) — attach **only when the test fails** (the link is labelled
-  `... (FAILED)`), so passing runs keep the report small while failures always
-  ship their full logs.
+**Reports section.** Above the results table, each test shows a one-line verdict:
+a green **PASS** with the list of nodes it passed on, or a red **FAILED** naming
+the node(s) that failed and a short reason. The per-node ANC log tarballs are
+also listed here by filename.
 
-The full tree is always written to `log_folder_path` regardless of this flag;
-the flag only governs what gets embedded in the HTML report bundle.
+**Links column (per test row).** Every row carries, in addition to **Full Log**:
+
+- **One `errors.json` link per node** — `errors.json` (at the root of each node's
+  collected log dir) is *copied* (not moved) next to the report as
+  `<node>_<test>_<timestamp>_errors.json` and linked as **`errors_occured: <node>`**
+  when that node failed, or **`no error: <node>`** when it passed. These links
+  always appear (pass or fail); the original stays in the collected log tree.
+- **One ANC-logs tarball link per node** — each node's collected tree is archived
+  into its own `<node>_<test>_<timestamp>_anc_logs.tar.gz` and linked as
+  **`ANC logs: <node>`** (suffixed `(FAILED)` on a failed node), controlled by
+  `ADD_ANC_LOGS_TO_HTML_REPORTS`:
+  - `True` — always attach (pass or fail).
+  - `False` (default) — attach **only when the test fails**, so passing runs keep
+    the report small while failures always ship their full logs.
+
+The full tree is always written to `log_folder_path` regardless of these flags;
+they only govern what gets embedded in the HTML report bundle.
