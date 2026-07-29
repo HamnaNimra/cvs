@@ -53,12 +53,11 @@ are `CPU_GROUPS` / `GPU_GROUPS`). Shared pytest fixtures live in this directory'
 `conftest.py` and apply to the `cpu/` and `gpu/` subfolders too. ANC is invoked
 from its installed location `/opt/amdtools/anc/anc.py`.
 
-**Logs & console:** each group's ANC log directory is copied to
-`log_folder_path` (default
-`{runner_log_folder}/anc_logs/<node>/<test_name>/<timestamp>`, where `<node>` is
-that node's `<ip>_<hostname>` label — so multi-node runs group every
-test/timestamp under each node's own folder); the resolved pattern is printed
-before the run. Set `print_all_to_console` to `False` in config to suppress the
+**Logs & console:** each group's ANC log directory is copied under the
+`log_folder_path` prefix, where CVS lays down the fixed
+`anc_logs/<node>/<test_name>/<timestamp>` structure (`<node>` is that node's
+`<ip>_<hostname>` label — so multi-node runs group every test/timestamp under
+each node's own folder); the resolved pattern is printed before the run. Set `print_all_to_console` to `False` in config to suppress the
 ANC group output on the console (install/ldconfig diagnostics still print). Pass
 or fail is read from each run's `console.log` final `ANC_SUCCESS [0]`.
 
@@ -132,10 +131,10 @@ The ANC config lives at `cvs/input/config_file/anc/anc_config.json`:
         "anc_release_url": "https://.../anc-release-helios-nda-1.4.7-rpm-linux-x64.tar.gz",
         "cvs_home": "{home}/cvs",
         "print_all_to_console": "True",
-        "log_folder_path": "{home}/cvs_logs/anc_logs/<node>/<test_name>/<timestamp>",
+        "log_folder_path": "/home/user/cvs_logs",
         "ADD_ANC_LOGS_TO_HTML_REPORTS": "False",
         "COLLECT_HTML_REPORTS": "True",
-        "html_report_path": "{home}/cvs_logs/html_reports/<node>/<test_name>/<timestamp>"
+        "html_report_path": "/home/user/cvs_logs"
     }
 }
 ```
@@ -151,16 +150,16 @@ Each key is documented inline in the shipped config via a matching
 | `anc_release_url` | ANC release archive URL (used by `anc_installation`). Flavour (deb/rpm/tar) is auto-detected from the filename. |
 | `cvs_home` | Staging dir on each node for the release download/unpack (tar flavour). `{home}` resolves to the SSH user's home. ANC itself always installs to `/opt/amdtools/anc`. |
 | `print_all_to_console` | `True` echoes ANC group output to console; `False` suppresses it (diagnostics still print). |
-| `log_folder_path` | Controller-side destination for collected logs. Tokens: `{home}` → `/home/<userid>`, `<node>` → the node's `<ip>_<hostname>` label, `<test_name>` → the group's test name, `<timestamp>` → per-run stamp (appended if omitted). |
+| `log_folder_path` | Controller-side destination **prefix** for collected logs. A plain directory path (leading `~` expanded); **required** — replace the shipped `REPLACE_ME`. CVS appends its own fixed `anc_logs/<node>/<test_name>/<timestamp>` structure under it (`<node>` → the node's `<ip>_<hostname>` label, `<test_name>` → the group's test name, `<timestamp>` → per-run stamp). |
 | `ADD_ANC_LOGS_TO_HTML_REPORTS` | `True` always bundles the collected ANC log tree (as a `.tar.gz` with a clickable link) into the pytest-html report zip. `False` (default) bundles it **only when the test fails**. |
-| `COLLECT_HTML_REPORTS` | `True` (default) auto-generates a pytest-html report even when no `--html` is passed, written to `html_report_path`. `False` disables auto-collection. An explicit `--html` on the command line always overrides `html_report_path`. |
-| `html_report_path` | Destination **directory** template for the auto-collected report (`<test_name>.html` is placed inside). Same tokens as `log_folder_path`. Since pytest-html makes one report per session before any node connects, `<node>` here is the **first** cluster node (label from the cluster file only, no SSH). |
+| `COLLECT_HTML_REPORTS` | `True` (default) auto-generates a pytest-html report even when no `--html` is passed, written under `html_report_path`. `False` disables auto-collection. An explicit `--html` on the command line always overrides `html_report_path`. |
+| `html_report_path` | Destination **prefix** for the auto-collected report; **required** — replace the shipped `REPLACE_ME`. CVS appends `html_reports/<node>/<test_name>/<timestamp>/` under it and places `<test_name>.html` inside. Since pytest-html makes one report per session before any node connects, `<node>` here is the **first** cluster node (label from the cluster file only, no SSH). |
 
-`{home}` is resolved on the controller from the cluster file's `username`, so it
-works even when the runner and nodes have different home paths. With the default
-`log_folder_path`, logs land at
-`/home/<userid>/cvs_logs/anc_logs/<node>/<test_name>/<timestamp>`, where `<node>`
-is that node's `<ip>_<hostname>` label.
+`log_folder_path` and `html_report_path` are plain directory prefixes (they do
+**not** accept `{home}`/`{runner_log_folder}` tokens). With a `log_folder_path`
+of `/home/user/cvs_logs`, logs land at
+`/home/user/cvs_logs/anc_logs/<node>/<test_name>/<timestamp>`, where `<node>` is
+that node's `<ip>_<hostname>` label.
 
 ---
 
@@ -288,17 +287,19 @@ failure (one failure per test, not one per node).
 
 ## 6. Artifacts
 
-Per node and per test, artifacts are downloaded to the resolved
-`log_folder_path` (default layout):
+Per node and per test, artifacts are downloaded under the `log_folder_path`
+prefix, in this fixed layout:
 
 ```
-<runner_log_folder>/anc_logs/<ip>_<hostname>/<test_name>/<timestamp>/
+<log_folder_path>/anc_logs/<ip>_<hostname>/<test_name>/<timestamp>/
 ```
 
-- `<runner_log_folder>` comes from `run_config["runner_log_folder"]` (or `{home}`
-  in the shipped config) — see the `log_folder_path` token table above.
-- `<ip>_<hostname>` is the per-node label; `<test_name>` is the group's test name
-  (e.g. `test_cpu_all`); `<timestamp>` keeps repeated runs separate.
+- `<log_folder_path>` is the user-supplied prefix (a plain directory path) — see
+  the `log_folder_path` row in the config table above.
+- `anc_logs/<ip>_<hostname>/<test_name>/<timestamp>` is the fixed structure CVS
+  lays down under the prefix: `<ip>_<hostname>` is the per-node label,
+  `<test_name>` is the group's test name (e.g. `test_cpu_all`), and `<timestamp>`
+  keeps repeated runs separate.
 
 Collected files:
 

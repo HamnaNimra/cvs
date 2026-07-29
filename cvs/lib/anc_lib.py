@@ -123,14 +123,24 @@ CONSOLE_LOG = "console.log"
 # diagnostics always print. Default: print everything.
 PRINT_ALL_TO_CONSOLE_KEY = "print_all_to_console"
 
-# config anc.log_folder_path is where the ANC log directory is copied. It may
-# contain "{runner_log_folder}" (resolved to run_config's runner_log_folder),
-# "<node>" (the per-node "<ip>_<hostname>" label), "<test_name>" (the suite's
-# test name, e.g. test_cpu), and "<timestamp>" (a per-run stamp so repeated runs
-# of the same test do not overwrite each other). "<node>" comes first by default
-# so a multi-node run groups every test/timestamp under each node's own folder.
+# Sentinel a user must overwrite in the config before running. Values left at
+# this literal are treated as "unset" and fail the run with a clear message.
+REPLACE_ME_SENTINEL = "REPLACE_ME"
+
+# config anc.log_folder_path and anc.html_report_path are user-supplied PREFIX
+# directories only. The fixed layout appended under each prefix is owned by the
+# code (below), not the config: the config just says "where should the tree
+# live", and CVS lays down the "<node>/<test_name>/<timestamp>" structure inside
+# it. Keeping the suffix here (not in the shipped config) means every run gets an
+# identical, predictable tree and users cannot accidentally break the layout.
+#
+# Tokens filled in at resolve time:
+#   "<node>"      -> the per-node "<ip>_<hostname>" label ("<node>" first so a
+#                    multi-node run groups every test/timestamp under each node).
+#   "<test_name>" -> the suite's test name (e.g. test_cpu).
+#   "<timestamp>" -> a per-run stamp so repeated runs never overwrite each other.
 LOG_FOLDER_PATH_KEY = "log_folder_path"
-DEFAULT_LOG_FOLDER_PATH = "{runner_log_folder}/anc_logs/<node>/<test_name>/<timestamp>"
+ANC_LOG_SUBPATH = "anc_logs/<node>/<test_name>/<timestamp>"
 
 # config anc.ADD_ANC_LOGS_TO_HTML_REPORTS controls whether the collected ANC
 # log tree is bundled into the pytest-html report zip. When True, always attach.
@@ -140,16 +150,15 @@ ADD_ANC_LOGS_TO_HTML_KEY = "ADD_ANC_LOGS_TO_HTML_REPORTS"
 
 # config anc.COLLECT_HTML_REPORTS ("True" by default) makes the ANC suites
 # generate a pytest-html report even when no --html is passed on the command
-# line. config anc.html_report_path is the destination template; it accepts the
-# same tokens as log_folder_path ("{runner_log_folder}", "<node>",
-# "<test_name>", "<timestamp>") plus "{home}" (already resolved by the config
-# placeholder pass). Because pytest-html creates ONE report per session before
-# any SSH connection exists, "<node>" here resolves to the FIRST node in the
-# cluster file's node_dict (label built from the cluster file alone, no SSH). An
-# explicit --html on the command line always wins over this.
+# line. config anc.html_report_path is a user-supplied PREFIX directory only;
+# the code appends ANC_HTML_SUBPATH under it (mirroring the log tree). Because
+# pytest-html creates ONE report per session before any SSH connection exists,
+# "<node>" here resolves to the FIRST node in the cluster file's node_dict
+# (label built from the cluster file alone, no SSH). An explicit --html on the
+# command line always wins over this.
 COLLECT_HTML_REPORTS_KEY = "COLLECT_HTML_REPORTS"
 HTML_REPORT_PATH_KEY = "html_report_path"
-DEFAULT_HTML_REPORT_PATH = "{runner_log_folder}/html_reports/<node>/<test_name>/<timestamp>"
+ANC_HTML_SUBPATH = "html_reports/<node>/<test_name>/<timestamp>"
 
 
 def _node_label_from_file(cluster_dict, host):
@@ -186,25 +195,41 @@ def cluster_node_label_from_file(cluster_dict):
     return _node_label_from_file(cluster_dict, hosts[0])
 
 
-def resolve_anc_html_report_path(config_dict, cluster_dict, test_name, timestamp):
+def _resolve_prefix(config_dict, key):
     '''
-    Resolve config anc.html_report_path into an absolute *.html file path for the
-    auto-collected pytest-html report. Substitutes "{runner_log_folder}",
-    "<node>" (first cluster node's label, from the file only), "<test_name>", and
-    "<timestamp>". The resolved template is treated as a directory; the report
-    file "<test_name>.html" is placed inside it.
+    Read a user-supplied prefix directory from config anc.<key> and normalise it.
+
+    The prefix is a plain filesystem path (leading "~" expanded); it does NOT
+    accept "{home}"/"{runner_log_folder}" tokens -- only the fixed suffix the
+    code owns carries "<node>"/"<test_name>"/"<timestamp>". A missing prefix or
+    one still left at the REPLACE_ME sentinel fails the run with a clear message,
+    matching how anc_release_url treats its own unset sentinel.
     '''
-    template = config_dict.get("anc", {}).get(HTML_REPORT_PATH_KEY, DEFAULT_HTML_REPORT_PATH)
-    runner_base = resolve_runner_results_base(config_dict.get("run_config", {}))
-    node = cluster_node_label_from_file(cluster_dict)
-    path = template.replace("{runner_log_folder}", runner_base)
-    path = path.replace("<node>", node)
-    path = path.replace("<test_name>", test_name)
-    path = path.replace("<timestamp>", timestamp)
+    prefix = config_dict.get("anc", {}).get(key)
+    if not prefix or str(prefix).strip() == REPLACE_ME_SENTINEL:
+        fail_test(
+            f"config anc.{key} is unset (still \"{REPLACE_ME_SENTINEL}\"); set it to the "
+            f"directory prefix where ANC artifacts should be written"
+        )
     # expanduser only expands a LEADING ~ (a mid-path ~ is a literal dir name,
     # not a home reference, and must not expand); it is a no-op otherwise.
-    path = os.path.expanduser(path)
-    path = os.path.abspath(path)
+    return os.path.expanduser(str(prefix).strip())
+
+
+def resolve_anc_html_report_path(config_dict, cluster_dict, test_name, timestamp):
+    '''
+    Resolve config anc.html_report_path (a user-supplied prefix directory) into
+    an absolute *.html file path for the auto-collected pytest-html report. The
+    code appends the fixed ANC_HTML_SUBPATH under the prefix, substituting
+    "<node>" (first cluster node's label, from the file only), "<test_name>", and
+    "<timestamp>". The resolved directory holds the report file "<test_name>.html".
+    '''
+    prefix = _resolve_prefix(config_dict, HTML_REPORT_PATH_KEY)
+    node = cluster_node_label_from_file(cluster_dict)
+    suffix = ANC_HTML_SUBPATH.replace("<node>", node)
+    suffix = suffix.replace("<test_name>", test_name)
+    suffix = suffix.replace("<timestamp>", timestamp)
+    path = os.path.abspath(os.path.join(prefix, suffix))
     return os.path.join(path, f"{test_name}.html")
 
 
@@ -224,36 +249,20 @@ def new_run_timestamp():
 
 def resolve_anc_log_folder(config_dict, test_name, timestamp, node=None):
     '''
-    Resolve config anc.log_folder_path into an absolute destination directory.
-
-    Substitutes "{runner_log_folder}" (from run_config, via
-    resolve_runner_results_base), "<node>" (the per-node "<ip>_<hostname>"
-    label), "<test_name>", and "<timestamp>". Falls back to
-    DEFAULT_LOG_FOLDER_PATH when the key is unset. When the template has no
-    "<timestamp>" token, the stamp is appended so repeated runs stay separate.
+    Resolve config anc.log_folder_path (a user-supplied prefix directory) into an
+    absolute destination directory. The code appends the fixed ANC_LOG_SUBPATH
+    under the prefix, substituting "<node>" (the per-node "<ip>_<hostname>"
+    label), "<test_name>", and "<timestamp>".
 
     When ``node`` is None the "<node>" token is left intact (used for the
-    run-start banner, which shows the pattern before any node is known). When a
-    node label is given but the template lacks a "<node>" token, the label is
-    appended so per-node artifacts never collide.
+    run-start banner, which shows the pattern before any node is known).
     '''
-    template = config_dict.get("anc", {}).get(LOG_FOLDER_PATH_KEY, DEFAULT_LOG_FOLDER_PATH)
-    runner_base = resolve_runner_results_base(config_dict.get("run_config", {}))
-    path = template.replace("{runner_log_folder}", runner_base)
-    path = path.replace("<test_name>", test_name)
+    prefix = _resolve_prefix(config_dict, LOG_FOLDER_PATH_KEY)
+    suffix = ANC_LOG_SUBPATH.replace("<test_name>", test_name)
+    suffix = suffix.replace("<timestamp>", timestamp)
     if node is not None:
-        if "<node>" in path:
-            path = path.replace("<node>", node)
-        else:
-            path = os.path.join(path, node)
-    if "<timestamp>" in path:
-        path = path.replace("<timestamp>", timestamp)
-    else:
-        path = os.path.join(path, timestamp)
-    # expanduser only expands a LEADING ~ (a mid-path ~ is a literal dir name,
-    # not a home reference, and must not expand); it is a no-op otherwise.
-    path = os.path.expanduser(path)
-    return os.path.abspath(path)
+        suffix = suffix.replace("<node>", node)
+    return os.path.abspath(os.path.join(prefix, suffix))
 
 
 # ANC group runs use an INACTIVITY timeout, not a total wall-clock cap: the run
@@ -1188,9 +1197,9 @@ def run_anc_groups(phdl, cluster_dict, config_dict, groups, test_name, request=N
     Run one or more ANC groups in a single invocation on all nodes.
 
     Executes ``cd <ANC_DIR> && sudo ./anc.py -g <groups...>`` on every node,
-    copies the ENTIRE ANC log directory to the configured log_folder_path
-    (``{runner_log_folder}/anc_logs/<node>/<test_name>/<timestamp>`` by default,
-    where ``<node>`` is that node's ``<ip>_<hostname>`` label), and PASSES only
+    copies the ENTIRE ANC log directory to the configured log_folder_path prefix
+    (laid down as ``<prefix>/anc_logs/<node>/<test_name>/<timestamp>``, where
+    ``<node>`` is that node's ``<ip>_<hostname>`` label), and PASSES only
     when every node's console.log ends with ANC_SUCCESS [0]. On failure the item
     summary and FAILED rows are surfaced. Failures across parallel nodes are
     aggregated into a SINGLE test failure.
