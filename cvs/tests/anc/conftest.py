@@ -72,7 +72,7 @@ def config_dict(config_file, cluster_dict, pytestconfig):
     Load and resolve the ANC test configuration from JSON.
 
     Placeholders such as {home} are resolved using cluster_dict
-    (e.g. cvs_home "{home}/cvs" -> "/home/<user>/cvs").
+    (e.g. a "{home}/logs" value -> "/home/<user>/logs").
 
     Fails the run up front (before any ANC command runs) on config problems:
 

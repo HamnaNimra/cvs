@@ -101,10 +101,6 @@ ANC_RETURN_CODE_RE = re.compile(r"return code\s+(\S+)\s*\[(-?\d+)\]")
 # run summary; surfaced verbatim so the CVS result shows the pass/fail counts.
 ANC_ITEMS_SUMMARY_RE = re.compile(r"^\s*Items:\s*\d+\s*Total\b.*$", re.MULTILINE)
 
-# A per-item FAILED row in the ANC Results Details table, e.g.
-#   "FAILED      i305 mithac      VENICE ES  ANC_ITEM_TIMEOUT".
-ANC_FAILED_ITEM_RE = re.compile(r"^\s*FAILED\s+\S+.*$", re.MULTILINE)
-
 # ANC reports an unknown group both as a FATAL line and a dedicated return code:
 #   "FATAL: Group 'foo' not found"
 #   "Program exiting with return code ANC_PROG_NOT_FOUND [13]"
@@ -172,9 +168,10 @@ COLLECT_HTML_REPORTS_KEY = "COLLECT_HTML_REPORTS"
 
 def _node_label_from_file(cluster_dict, host):
     '''
-    Build the "<ip>_<hostkey>" artifact folder label for a node using ONLY the
-    cluster file (no SSH). ip is the node's vpc_ip (or the host key when vpc_ip is
-    missing/"NA"); hostkey is the cluster-file node_dict key.
+    Build the artifact folder label for a node using ONLY the cluster file (no
+    SSH). When the node has a usable vpc_ip that differs from the host key the
+    label is "<ip>_<hostkey>"; when vpc_ip is missing/"NA" (or equals the host
+    key) the label is just the host key so the name is not duplicated.
 
     This is the single source of truth for the node label so that every
     artifact tree (HTML report AND collected ANC logs) uses an identical folder
@@ -185,8 +182,14 @@ def _node_label_from_file(cluster_dict, host):
     info = (cluster_dict.get("node_dict", {}) or {}).get(host, {}) or {}
     ip = info.get("vpc_ip")
     if not ip or ip == "NA":
-        ip = host
-    return _sanitize_path_component(f"{ip}_{host}")
+        log.info("Node %s: vpc_ip not available in cluster file; using host name only for the node label", host)
+        label = _sanitize_path_component(f"{host}")
+    elif ip == host:
+        label = _sanitize_path_component(f"{host}")
+    else:
+        label = _sanitize_path_component(f"{ip}_{host}")
+    log.info("Node %s: node == %s", host, label)
+    return label
 
 
 def cluster_node_label_from_file(cluster_dict):
@@ -434,10 +437,10 @@ def _assert_shell_safe(anc_cfg, keys):
     '''
     Reject config values that would break the single-quoted remote shell strings.
 
-    The install commands wrap config values (cvs_home, anc_release_url, ...) in
-    single quotes when interpolating them into the remote command. A value that
-    itself contains a single quote would break that quoting. Config is trusted,
-    so rather than shell-escape everywhere we validate at this boundary and fail
+    The install commands wrap config values (anc_release_url, ...) in single
+    quotes when interpolating them into the remote command. A value that itself
+    contains a single quote would break that quoting. Config is trusted, so
+    rather than shell-escape everywhere we validate at this boundary and fail
     fast with a clear message.
     '''
     for key in keys:
@@ -539,7 +542,7 @@ def install_anc(phdl, cluster_dict, config_dict):
     anc_cfg = config_dict["anc"]
     # Values interpolated into single-quoted remote shell strings by the
     # sub-installers; reject quotes up front (config is trusted, boundary check).
-    _assert_shell_safe(anc_cfg, ("cvs_home", "anc_release_url"))
+    _assert_shell_safe(anc_cfg, ("anc_release_url",))
     anc_version = anc_cfg.get("anc_version")
     anc_release_url = anc_cfg["anc_release_url"]
     pkg_type = detect_package_type(anc_release_url)
@@ -610,29 +613,29 @@ def _install_anc_rpm(phdl, cluster_dict, config_dict):
     update_test_result reporting call.
     '''
     anc_cfg = config_dict["anc"]
-    cvs_home = anc_cfg["cvs_home"]
     anc_release_url = anc_cfg["anc_release_url"]
-    tarball = anc_release_url.rsplit("/", 1)[-1]
 
-    log.info("ANC: install .rpm package(s) on remote nodes (cvs_home=%s)", cvs_home)
+    log.info("ANC: install .rpm package(s) on remote nodes (staging=mktemp temp dir)")
 
     install_cmd = (
-        f"set -e && "
-        f"mkdir -p '{cvs_home}' && cd '{cvs_home}' && "
-        f"echo 'Downloading ANC release...' && "
-        f"{_download_with_progress_snippet(anc_release_url, tarball)} && "
-        f"echo 'Extracting outer archive...' && "
-        f"tar -xzf '{tarball}' && "
-        f"rm -f '{tarball}' && "
+        f"set -e; "
+        # Private staging dir; trap removes it on success AND failure so the
+        # large download/unpack never leaks onto the node.
+        f"STAGE=$(mktemp -d); "
+        f"trap 'rm -rf \"$STAGE\"' EXIT; "
+        f"cd \"$STAGE\"; "
+        f"echo 'Downloading ANC release...'; "
+        f"{_download_with_progress_snippet(anc_release_url, 'outer.tar.gz')}; "
+        f"echo 'Extracting outer archive...'; "
+        f"tar -xzf 'outer.tar.gz'; "
         # Install via dnf so declared deps are resolved from the repos.
-        f"echo 'Installing ANC .rpm package(s)...' && "
+        f"echo 'Installing ANC .rpm package(s)...'; "
         # `|| true` so an empty glob doesn't abort the whole script under
         # `set -e` (failed command substitution); the -z check below reports it.
-        f"rpms=$(ls anc*.rpm 2>/dev/null || true) && "
-        f"if [ -z \"$rpms\" ]; then echo 'NO_RPM_FOUND' && exit 1; fi && "
-        f"sudo dnf install -y $rpms && "
-        f"rm -f $rpms && "
-        f"echo '--- Verification ---' && "
+        f"rpms=$(ls anc*.rpm 2>/dev/null || true); "
+        f"if [ -z \"$rpms\" ]; then echo 'NO_RPM_FOUND'; exit 1; fi; "
+        f"sudo dnf install -y $rpms; "
+        f"echo '--- Verification ---'; "
         f"{ANC_BIN} --help && echo 'ANC_INSTALL_SUCCESS'"
     )
 
@@ -641,7 +644,7 @@ def _install_anc_rpm(phdl, cluster_dict, config_dict):
 
     for host, output in out_dict.items():
         if "NO_RPM_FOUND" in output:
-            fail_test(f"ANC .rpm installation failed on {host}: no anc*.rpm found after extracting '{tarball}'")
+            fail_test(f"ANC .rpm installation failed on {host}: no anc*.rpm found after extracting the release archive")
         elif "ANC_INSTALL_SUCCESS" not in output:
             fail_test(f"ANC .rpm installation failed on {host}: '{ANC_BIN} --help' did not succeed")
         else:
@@ -662,30 +665,31 @@ def _install_anc_deb(phdl, cluster_dict, config_dict):
     update_test_result reporting call.
     '''
     anc_cfg = config_dict["anc"]
-    cvs_home = anc_cfg["cvs_home"]
     anc_release_url = anc_cfg["anc_release_url"]
-    tarball = anc_release_url.rsplit("/", 1)[-1]
 
-    log.info("ANC: install .deb package(s) on remote nodes (cvs_home=%s)", cvs_home)
+    log.info("ANC: install .deb package(s) on remote nodes (staging=mktemp temp dir)")
 
     install_cmd = (
-        f"set -e && "
-        f"mkdir -p '{cvs_home}' && cd '{cvs_home}' && "
-        f"echo 'Downloading ANC release...' && "
-        f"{_download_with_progress_snippet(anc_release_url, tarball)} && "
-        f"echo 'Extracting outer archive...' && "
-        f"tar -xzf '{tarball}' && "
-        f"rm -f '{tarball}' && "
+        f"set -e; "
+        # Private staging dir; trap removes it on success AND failure so the
+        # large download/unpack never leaks onto the node.
+        f"STAGE=$(mktemp -d); "
+        f"trap 'rm -rf \"$STAGE\"' EXIT; "
+        f"cd \"$STAGE\"; "
+        f"echo 'Downloading ANC release...'; "
+        f"{_download_with_progress_snippet(anc_release_url, 'outer.tar.gz')}; "
+        f"echo 'Extracting outer archive...'; "
+        f"tar -xzf 'outer.tar.gz'; "
         # python3 is present on these nodes but not tracked in dpkg's database
         # (installed outside apt/dpkg), so a plain `dpkg -i` aborts on the
         # unsatisfiable "depends on python3" check. Force past dependency
         # problems and then configure so the tool is set up regardless.
-        f"echo 'Installing ANC .deb package(s)...' && "
+        f"echo 'Installing ANC .deb package(s)...'; "
         # `|| true` so an empty glob doesn't abort the whole script under
         # `set -e` (failed command substitution); the -z check below reports it.
-        f"debs=$(ls anc*.deb 2>/dev/null || true) && "
-        f"if [ -z \"$debs\" ]; then echo 'NO_DEB_FOUND' && exit 1; fi && "
-        f"sudo dpkg -i --force-depends $debs && "
+        f"debs=$(ls anc*.deb 2>/dev/null || true); "
+        f"if [ -z \"$debs\" ]; then echo 'NO_DEB_FOUND'; exit 1; fi; "
+        f"sudo dpkg -i --force-depends $debs; "
         # Configure ONLY the ANC packages (by name), not `-a` (which would
         # configure every pending package on the node). Names come from the
         # .deb control field so we never touch unrelated half-installed pkgs.
@@ -697,12 +701,11 @@ def _install_anc_deb(phdl, cluster_dict, config_dict):
         # "already installed and configured" to stderr and exits non-zero (noisy
         # even when swallowed). Only packages not in "install ok installed" get a
         # configure pass; the `anc.py --help` check below is the real gate.
-        f"pkgs=$(for d in $debs; do dpkg-deb -f \"$d\" Package; done) && "
+        f"pkgs=$(for d in $debs; do dpkg-deb -f \"$d\" Package; done); "
         f"for p in $pkgs; do "
         f"if ! dpkg-query -W -f='${{Status}}' \"$p\" 2>/dev/null | grep -q 'install ok installed'; then "
-        f"sudo dpkg --configure --force-depends \"$p\"; fi; done && "
-        f"rm -f $debs && "
-        f"echo '--- Verification ---' && "
+        f"sudo dpkg --configure --force-depends \"$p\"; fi; done; "
+        f"echo '--- Verification ---'; "
         f"{ANC_BIN} --help && echo 'ANC_INSTALL_SUCCESS'"
     )
 
@@ -711,7 +714,7 @@ def _install_anc_deb(phdl, cluster_dict, config_dict):
 
     for host, output in out_dict.items():
         if "NO_DEB_FOUND" in output:
-            fail_test(f"ANC .deb installation failed on {host}: no anc*.deb found after extracting '{tarball}'")
+            fail_test(f"ANC .deb installation failed on {host}: no anc*.deb found after extracting the release archive")
         elif "ANC_INSTALL_SUCCESS" not in output:
             fail_test(f"ANC .deb installation failed on {host}: '{ANC_BIN} --help' did not succeed")
         else:
@@ -724,51 +727,69 @@ def _install_anc_tar(phdl, cluster_dict, config_dict):
     '''
     Install ANC from the tar release on remote nodes (fresh install each run).
 
-    The tar release's ``anc-tool`` / ``anc-content`` payloads are relocatable
-    (top-level ``anc/`` and ``anc/content/`` + sibling tool dirs). Extracting
-    BOTH into ``ANC_TOOLS_PREFIX`` (/opt/amdtools) reproduces exactly the layout
-    the deb/rpm packages install (verified against the 1.4.7 packages), so ANC
-    ends up at ``ANC_BIN`` (/opt/amdtools/anc/anc.py) and the content YAMLs'
-    hard-coded ``exe_path: /opt/amdtools/...`` entries resolve. The release
-    archive is staged in ``cvs_home`` only for the download/unpack; the tools
-    themselves always live under /opt/amdtools regardless of flavour.
+    The outer release archive holds two relocatable inner tarballs:
+      - ``anc-tool*.tar.gz``    -> top-level ``anc/`` (anc.py, pylib, content/base)
+      - ``anc-content*.tar.gz`` -> the tool folders (amdxio, ampttk, anc/content,
+        ccx_tests, computerocker, difect, firexs2, maxcorestim, maxiostim,
+        memrocker, miidct, mithac, rvs, transferbench)
 
-    ``content/base`` (a no_op placeholder) is deliberately kept, matching the
-    deb/rpm install. Extraction into /opt/amdtools needs sudo, so the runner must
-    have passwordless sudo (already required to run ANC).
+    Extracting BOTH into ``ANC_TOOLS_PREFIX`` (/opt/amdtools) reproduces exactly
+    the layout the deb/rpm packages install, so ANC ends up at ``ANC_BIN``
+    (/opt/amdtools/anc/anc.py) and the content YAMLs' hard-coded
+    ``exe_path: /opt/amdtools/...`` entries resolve.
+
+    Algorithm (per node):
+      1. Download the outer archive into a private ``mktemp -d`` staging dir. A
+         ``trap ... EXIT`` removes that dir on ANY exit (success OR failure), so
+         the ~1.3 GB of archives never linger.
+      2. Extract the outer archive to expose the two inner tarballs, derive the
+         set of TOP-LEVEL folders they provide, and ``rm -rf`` each of those
+         under /opt/amdtools so the install is clean (a stale file removed in a
+         new release does not survive as an overlaid leftover). Only the folders
+         the release actually ships are touched; unrelated /opt/amdtools content
+         is left alone.
+      3. Extract both inner tarballs into /opt/amdtools. The top-level folders
+         are thus replaced wholesale; the files inside arrange themselves from
+         the archive. ``content/base`` (a no_op placeholder) is kept, matching
+         the deb/rpm install.
+
+    Extraction into /opt/amdtools needs sudo, so the runner must have
+    passwordless sudo (already required to run ANC).
 
     Records failures via fail_test; the caller (install_anc) owns the single
     update_test_result reporting call.
     '''
     anc_cfg = config_dict["anc"]
-    cvs_home = anc_cfg["cvs_home"]
     anc_release_url = anc_cfg["anc_release_url"]
-    tarball = anc_release_url.rsplit("/", 1)[-1]
 
-    log.info("ANC: install tar release on remote nodes (cvs_home=%s, install prefix=%s)", cvs_home, ANC_TOOLS_PREFIX)
+    log.info("ANC: install tar release on remote nodes (staging=mktemp temp dir, install prefix=%s)", ANC_TOOLS_PREFIX)
 
     install_cmd = (
-        f"set -e && "
-        f"mkdir -p '{cvs_home}' && cd '{cvs_home}' && "
-        f"echo 'Downloading ANC release...' && "
-        f"{_download_with_progress_snippet(anc_release_url, tarball)} && "
-        f"echo 'Extracting outer archive...' && "
-        f"tar -xzf '{tarball}' && "
-        f"rm -f '{tarball}' && "
-        # Fresh install: drop any prior ANC tree, then extract both payloads
-        # into /opt/amdtools so the layout matches the deb/rpm packages.
-        f"echo 'Removing existing {ANC_DIR}...' && "
-        f"sudo rm -rf '{ANC_DIR}' && "
-        f"sudo mkdir -p '{ANC_TOOLS_PREFIX}' && "
-        f"echo 'Extracting anc-tool archive to {ANC_TOOLS_PREFIX}...' && "
-        f"sudo tar -xzf anc-tool*.tar.gz -C '{ANC_TOOLS_PREFIX}' && "
-        f"rm -f anc-tool*.tar.gz && "
-        f"echo 'Extracting anc-content archive to {ANC_TOOLS_PREFIX}...' && "
-        f"sudo tar -xzf anc-content*.tar.gz -C '{ANC_TOOLS_PREFIX}' && "
-        f"rm -f anc-content*.tar.gz && "
-        f"echo '--- Directory listing (2 levels) ---' && "
-        f"find '{ANC_TOOLS_PREFIX}' -maxdepth 2 -type d | sort && "
-        f"echo '--- Verification ---' && "
+        f"set -e; "
+        # Private staging dir; trap removes it on success AND failure so the
+        # large download/unpack never leaks onto the node.
+        f"STAGE=$(mktemp -d); "
+        f"trap 'rm -rf \"$STAGE\"' EXIT; "
+        f"cd \"$STAGE\"; "
+        f"echo 'Downloading ANC release...'; "
+        f"{_download_with_progress_snippet(anc_release_url, 'outer.tar.gz')}; "
+        f"echo 'Extracting outer archive...'; "
+        f"tar -xzf 'outer.tar.gz'; "
+        # Top-level folders shipped by either payload; strip the content
+        # tarball's './' prefix and drop the '.' root entry.
+        f"echo 'Determining top-level tool folders...'; "
+        f"tops=$( {{ tar -tzf anc-tool*.tar.gz; tar -tzf anc-content*.tar.gz; }} "
+        f"| sed 's#^\\./##' | awk -F/ '{{print $1}}' | grep -vE '^[.]?$' | sort -u ); "
+        f"sudo mkdir -p '{ANC_TOOLS_PREFIX}'; "
+        f"echo 'Replacing top-level folders under {ANC_TOOLS_PREFIX}...'; "
+        f"for name in $tops; do echo \"  {ANC_TOOLS_PREFIX}/$name\"; sudo rm -rf \"{ANC_TOOLS_PREFIX}/$name\"; done; "
+        f"echo 'Extracting anc-tool archive to {ANC_TOOLS_PREFIX}...'; "
+        f"sudo tar -xzf anc-tool*.tar.gz -C '{ANC_TOOLS_PREFIX}'; "
+        f"echo 'Extracting anc-content archive to {ANC_TOOLS_PREFIX}...'; "
+        f"sudo tar -xzf anc-content*.tar.gz -C '{ANC_TOOLS_PREFIX}'; "
+        f"echo '--- Installed top-level tools ---'; "
+        f"ls '{ANC_TOOLS_PREFIX}' | sort; "
+        f"echo '--- Verification ---'; "
         f"test -f '{ANC_BIN}' && echo 'ANC_INSTALL_SUCCESS'"
     )
 
@@ -1084,18 +1105,13 @@ def _summarize_failure(console_text):
     '''
     Build a concise failure detail string from ANC's console.log summary.
 
-    Pulls the "Items: N Total | ..." summary line plus any per-item FAILED
-    rows so the CVS failure message shows both the counts and which items
-    failed.
+    Pulls only the "Items: N Total | ..." counts line so the CVS failure
+    message stays a one-liner. The per-item FAILED rows are intentionally
+    omitted here (they can number in the dozens and bloat the verdict); the
+    full per-item detail remains in the collected ANC logs / errors.json.
     '''
-    parts = []
     items = ANC_ITEMS_SUMMARY_RE.search(console_text)
-    if items:
-        parts.append(items.group(0).strip())
-    failed_rows = [m.strip() for m in ANC_FAILED_ITEM_RE.findall(console_text)]
-    if failed_rows:
-        parts.append("failed items: " + " | ".join(failed_rows))
-    return "; ".join(parts)
+    return items.group(0).strip() if items else ""
 
 
 # Per-node outcome from _evaluate_node. ``reason`` is None on pass, else a short
@@ -1282,9 +1298,19 @@ def _attach_node_anc_tarballs(request, mgr, config_dict, test_name, timestamp, r
             continue
         link_name = f"ANC logs: {r.label}" + (" (FAILED)" if r.reason else "")
         try:
-            # track_in_reports=True lists the tarball (by filename) in the Reports
-            # section; the per-row link is added separately via _stash_report_link.
-            rel_path = mgr.add_html_to_report(tar_path, request=request, track_in_reports=True)
+            # track_in_reports=True lists the tarball in the Reports section; the
+            # Reports renderer groups it under its test's verdict and shows it
+            # only for FAILED tests (test_name/passed carry that grouping info).
+            # The per-row link is added separately via _stash_report_link.
+            # NOTE: do not pass link_name here — the per-row link is added by
+            # _stash_report_link below; passing it would duplicate the row link.
+            rel_path = mgr.add_html_to_report(
+                tar_path,
+                request=request,
+                track_in_reports=True,
+                test_name=test_name,
+                passed=not r.reason,
+            )
             _stash_report_link(request, rel_path, link_name)
         except Exception as exc:  # best-effort
             log.warning("ANC '%s': could not attach logs for node %s: %s", test_name, r.label, exc)

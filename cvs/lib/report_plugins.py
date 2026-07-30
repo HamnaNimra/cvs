@@ -24,6 +24,8 @@ REPORT_STYLE_OVERRIDES = """<style>
     .col-result.collapsed:hover::after { content: none !important; }
     .collapsible td:not(.col-links) { cursor: default !important; }
     .extras-row { display: none !important; }
+    /* Separate the per-node links in the Links column with a "|" divider. */
+    .col-links a + a::before { content: " | "; color: #888; }
 </style>"""
 
 
@@ -127,7 +129,9 @@ class HtmlReportManager:
 
         return extras
 
-    def add_html_to_report(self, html_file, link_name=None, request=None, dest_name=None, track_in_reports=True):
+    def add_html_to_report(
+        self, html_file, link_name=None, request=None, dest_name=None, track_in_reports=True, test_name=None, passed=None
+    ):
         """Copy an external file into the report directory for inclusion in the ZIP bundle.
 
         Args:
@@ -140,6 +144,10 @@ class HtmlReportManager:
             track_in_reports (bool): When True (default) the file is listed in the Reports section
                 bullet list. Set False for per-row artifacts (errors.json, per-node ANC tarballs)
                 that are already linked from the results table and would clutter Reports.
+            test_name (str, optional): Owning test function name; lets the Reports section group
+                this artifact under its test's verdict line.
+            passed (bool, optional): Whether the owning test passed; the Reports section lists
+                artifacts only for FAILED tests, so passing-test artifacts are skipped there.
 
         Returns:
             str: Relative path to the copied file (for linking), or None if copying failed
@@ -173,6 +181,8 @@ class HtmlReportManager:
                     'name': link_name or source_path.name,
                     'path': rel_path_str,
                     'original_path': str(source_path),
+                    'test_name': test_name,
+                    'passed': passed,
                 }
                 self._custom_test_reports.append(report_info)
 
@@ -382,32 +392,54 @@ class HtmlReportManager:
     def generate_reports_section(self):
         """Generate HTML for the Reports section.
 
-        Renders the per-test PASS/FAIL verdict lines first (green/red), then keeps the
-        existing bullet list of attached report artifacts (e.g. ANC log tarballs).
+        Failure-focused: lists ONLY the FAILED tests, and under each failed test's
+        red verdict line, nests that test's failed-node ANC log zip(s) so the item
+        and its archive sit together. Passing tests (and passing-node zips) are
+        omitted here on purpose — the Summary table's Links column already carries
+        them. When every ANC test passed, a single green "All tests passed" note is
+        shown instead. Non-ANC artifacts (rccl/preflight, which carry no test_name)
+        keep their existing flat bullet list.
         """
         if not self._anc_verdicts and not self._custom_test_reports:
             return ""
 
+        failed_verdicts = [v for v in self._anc_verdicts if not v["passed"]]
+        # ANC log zips are tagged with their owning test_name; everything else
+        # (rccl/preflight artifacts) has no test_name and stays in the flat list.
+        anc_artifacts = [r for r in self._custom_test_reports if r.get("test_name")]
+        other_artifacts = [r for r in self._custom_test_reports if not r.get("test_name")]
+
         html = '<div><h2>Reports</h2>'
 
-        # Per-test verdicts: green "PASS" line or red "FAILED" line.
         if self._anc_verdicts:
-            html += '<ul>'
-            for v in self._anc_verdicts:
-                if v["passed"]:
-                    status = '<span style="color:#2e7d32;font-weight:bold;">PASS</span>'
-                else:
+            if failed_verdicts:
+                html += '<ul>'
+                for v in failed_verdicts:
                     status = '<span style="color:#c62828;font-weight:bold;">FAILED</span>'
-                name = self._escape(v["name"])
-                detail = f' &mdash; {self._escape(v["detail"])}' if v["detail"] else ''
-                html += f'<li>{name}: {status}{detail}</li>'
-            html += '</ul>'
+                    name = self._escape(v["name"])
+                    detail = f' &mdash; {self._escape(v["detail"])}' if v["detail"] else ''
+                    html += f'<li>{name}: {status}{detail}'
+                    # Nest this test's failed-node zip(s) directly under its verdict.
+                    zips = [
+                        r
+                        for r in anc_artifacts
+                        if r.get("test_name") == v["name"] and r.get("passed") is False
+                    ]
+                    if zips:
+                        html += '<ul>'
+                        for z in zips:
+                            html += f'<li><a href="{z["path"]}" target="_blank">{self._escape(z["name"])}</a></li>'
+                        html += '</ul>'
+                    html += '</li>'
+                html += '</ul>'
+            else:
+                html += '<ul><li><span style="color:#2e7d32;font-weight:bold;">All tests passed</span></li></ul>'
 
-        # Attached artifacts (e.g. per-node ANC log tarballs) kept as before.
-        if self._custom_test_reports:
+        # Non-ANC attached artifacts (e.g. rccl/preflight) kept as a flat list.
+        if other_artifacts:
             html += '<ul>'
-            for report in self._custom_test_reports:
-                html += f'<li><a href="{report["path"]}" target="_blank">{report["name"]}</a></li>'
+            for report in other_artifacts:
+                html += f'<li><a href="{report["path"]}" target="_blank">{self._escape(report["name"])}</a></li>'
             html += '</ul>'
 
         html += '</div>'

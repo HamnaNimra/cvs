@@ -113,8 +113,10 @@ Provide your SSH user, private key, and the nodes to target:
 ```
 
 - The `node_dict` keys are the SSH targets ANC commands run against.
-- `vpc_ip` is used (together with the live hostname) to name the per-node
-  artifact folders: `<vpc_ip>_<hostname>`.
+- The per-node artifact folder label is derived **from the cluster file only**
+  (no SSH/hostname lookup): it is `<vpc_ip>_<node_dict key>`. When `vpc_ip` is
+  missing, `"NA"`, or equal to the node_dict key, the label collapses to just the
+  node_dict key (no duplicated name).
 
 ### Config file
 
@@ -129,7 +131,6 @@ The ANC config lives at `cvs/input/config_file/anc/anc_config.json`:
         "install_timeout": 1800,
         "anc_version": "1.4.7",
         "anc_release_url": "https://.../anc-release-helios-nda-1.4.7-rpm-linux-x64.tar.gz",
-        "cvs_home": "{home}/cvs",
         "print_all_to_console": "True",
         "log_folder_path": "/home/user/cvs_logs",
         "ADD_ANC_LOGS_TO_HTML_REPORTS": "False",
@@ -146,8 +147,7 @@ Each key is documented inline in the shipped config via a matching
 | `inactivity_timeout` | Per-group **inactivity** timeout in seconds (default 900 = 15 min). Applies to ANC group runs only, not install. A group is aborted only after this many seconds with **no new ANC output**; there is no total wall-clock cap, so a group that keeps producing progress runs as long as it needs. (Replaces the old `test_timeout` total-budget cap, which killed healthy, actively-running groups.) |
 | `install_timeout` | Package download+install **inactivity** timeout in seconds (default 1800 = 30 min), used only by `anc_installation` / the install pre-task. It is a per-read (no-output) timeout, not a total budget: the download emits a periodic progress heartbeat so a slow link never trips it, while a genuine stall still fails. Independent of `inactivity_timeout`. |
 | `anc_version` | Expected ANC version; install pre-task skips (re)install when already present and post-verifies the match. |
-| `anc_release_url` | ANC release archive URL (used by `anc_installation`). Flavour (deb/rpm/tar) is auto-detected from the filename. |
-| `cvs_home` | Staging dir on each node for the release download/unpack (tar flavour). `{home}` resolves to the SSH user's home. ANC itself always installs to `/opt/amdtools/anc`. |
+| `anc_release_url` | ANC release archive URL (used by `anc_installation`). Flavour (deb/rpm/tar) is auto-detected from the filename. The download/unpack is staged in a private temp dir on each node and removed after install (success or failure); ANC itself always installs to `/opt/amdtools/anc`. |
 | `print_all_to_console` | `True` echoes ANC group output to console; `False` suppresses it (diagnostics still print). |
 | `log_folder_path` | Controller-side destination **prefix** for **all** ANC artifacts — collected logs and the auto-collected HTML report. A plain directory path (leading `~` expanded); **required** — replace the shipped `REPLACE_ME`. CVS appends its own fixed structure under it: logs at `anc_logs/<node>/<test_name>/<timestamp>` and the report at `html_reports/<node>/<test_name>/<timestamp>/<test_name>.html` (`<node>` → the node's `<ip>_<hostname>` label, `<test_name>` → the group's test name, `<timestamp>` → per-run stamp). |
 | `ADD_ANC_LOGS_TO_HTML_REPORTS` | Governs the per-node **ANC logs** tarball links. `True` always bundles each node's collected log tree (one `.tar.gz` + link per node) into the pytest-html report zip. `False` (default) bundles them **only when the test fails**. The per-node `errors.json` links appear regardless of this flag. |
@@ -197,18 +197,20 @@ release archive in a staging dir, then extract the two `anc-tool` and
 packages:
 
 ```bash
-cd "$HOME/cvs"   # staging dir (cvs_home); only used for the download/unpack
+STAGE=$(mktemp -d)              # private staging dir, only for the download/unpack
+trap 'rm -rf "$STAGE"' EXIT     # auto-remove it on exit (success or failure)
+cd "$STAGE"
 
 # Download and extract the ANC release
 wget -q "https://atlartifactory.amd.com:8443/artifactory/HW-ANCRelease-REL-LOCAL/anc-release/helios_nda/1.4.7/anc-release-helios-nda-1.4.7-tar-linux-x64.tar.gz" \
-  -O anc-release.tar.gz
-tar -xzf anc-release.tar.gz && rm -f anc-release.tar.gz
+  -O outer.tar.gz
+tar -xzf outer.tar.gz
 
-# Extract the tool and content archives into /opt/amdtools (needs sudo)
-sudo rm -rf /opt/amdtools/anc
+# Extract the tool and content archives into /opt/amdtools (needs sudo).
+# Replace the top-level folders the release ships so no stale files linger.
 sudo mkdir -p /opt/amdtools
-sudo tar -xzf anc-tool*.tar.gz    -C /opt/amdtools && rm -f anc-tool*.tar.gz
-sudo tar -xzf anc-content*.tar.gz -C /opt/amdtools && rm -f anc-content*.tar.gz
+sudo tar -xzf anc-tool*.tar.gz    -C /opt/amdtools
+sudo tar -xzf anc-content*.tar.gz -C /opt/amdtools
 ```
 
 For the **deb**/**rpm** flavours, install the extracted `anc*.deb` / `anc*.rpm`
@@ -317,10 +319,14 @@ written automatically under `log_folder_path` (at
 `html_reports/<node>/<test_name>/<timestamp>/<test_name>.html`) with no `--html`
 needed. An explicit `--html` always overrides that auto-collected path.
 
-**Reports section.** Above the results table, each test shows a one-line verdict:
-a green **PASS** with the list of nodes it passed on, or a red **FAILED** naming
-the node(s) that failed and a short reason. The per-node ANC log tarballs are
-also listed here by filename.
+**Reports section.** Above the results table, this section is failure-focused: it
+lists **only the FAILED tests**. Each failed test shows a red **FAILED** verdict
+naming the node(s) that failed and a short reason, and directly beneath it nests
+that test's **failed-node** ANC log tarball link(s) — so the failed item and its
+archive sit together. Passing tests, and passing-node tarballs, are omitted here
+(the results table's Links column still carries them). When every ANC test
+passed, a single green **All tests passed** note is shown instead. Non-ANC
+artifacts (e.g. rccl/preflight) keep a flat bullet list.
 
 **Links column (per test row).** Every row carries, in addition to **Full Log**:
 

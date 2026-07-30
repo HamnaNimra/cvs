@@ -16,9 +16,6 @@
         "_comment_anc_release_url": "URL of the ANC release archive to download and install. Flavour (deb/rpm/tar) is auto-detected from the filename.",
         "anc_release_url": "REPLACE_ME",
 
-        "_comment_cvs_home": "Staging dir on each node for the release download/unpack (tar flavour). '{home}' resolves to the SSH user's home directory. ANC itself always installs to /opt/amdtools/anc regardless of flavour.",
-        "cvs_home": "{home}/cvs",
-
         "_comment_print_all_to_console": "'True' echoes ANC group output to the console; 'False' suppresses it (install/ldconfig/version diagnostics still print).",
         "print_all_to_console": "True",
 
