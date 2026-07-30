@@ -130,7 +130,14 @@ class HtmlReportManager:
         return extras
 
     def add_html_to_report(
-        self, html_file, link_name=None, request=None, dest_name=None, track_in_reports=True, test_name=None, passed=None
+        self,
+        html_file,
+        link_name=None,
+        request=None,
+        dest_name=None,
+        track_in_reports=True,
+        test_name=None,
+        passed=None,
     ):
         """Copy an external file into the report directory for inclusion in the ZIP bundle.
 
@@ -420,11 +427,7 @@ class HtmlReportManager:
                     detail = f' &mdash; {self._escape(v["detail"])}' if v["detail"] else ''
                     html += f'<li>{name}: {status}{detail}'
                     # Nest this test's failed-node zip(s) directly under its verdict.
-                    zips = [
-                        r
-                        for r in anc_artifacts
-                        if r.get("test_name") == v["name"] and r.get("passed") is False
-                    ]
+                    zips = [r for r in anc_artifacts if r.get("test_name") == v["name"] and r.get("passed") is False]
                     if zips:
                         html += '<ul>'
                         for z in zips:
