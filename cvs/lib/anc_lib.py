@@ -1417,18 +1417,25 @@ def run_anc_groups(phdl, cluster_dict, config_dict, groups, test_name, request=N
         # a per-run file on the node and echo ONLY the "Log directory:" line.
         # The verdict is sourced from the collected console.log regardless.
         # Because the channel would otherwise be silent for the whole run (which
-        # a pure inactivity timeout would treat as a stall), emit a periodic
-        # heartbeat while ANC is alive so the inactivity timer only fires on a
-        # real hang. The heartbeat reports the growing output file size, mirroring
-        # the install download-progress snippet.
+        # a pure inactivity timeout would treat as a stall), emit a heartbeat that
+        # mirrors ANC's own activity: echo ONLY when the output file has GROWN
+        # since the last tick. While ANC keeps writing, the heartbeat keeps the
+        # SSH channel active so the inactivity timer never fires; if ANC hangs
+        # (alive but no new output), the file stops growing, the channel goes
+        # silent, and the inactivity timer fires exactly as it would in
+        # print_all_to_console=true mode. ``last=-1`` seeds the loop so the first
+        # tick always emits once (arming the timer through ANC's startup / time to
+        # first output, which would otherwise look like silence).
         remote_stdout = "/tmp/anc_run_$$.out"
         cmd = (
             f"cd '{ANC_DIR}' && "
             f"( sudo ./anc.py -g {groups_arg} > '{remote_stdout}' 2>&1 ) & "
             f"anc_pid=$! && "
+            f"last=-1; "
             f"while kill -0 $anc_pid 2>/dev/null; do "
             f"sz=$(wc -c < '{remote_stdout}' 2>/dev/null || echo 0); "
-            f"echo \"ANC {test_name} running: ${{sz}} bytes of output\"; "
+            f"if [ \"$sz\" -gt \"$last\" ]; then "
+            f"echo \"ANC {test_name} running: ${{sz}} bytes of output\"; last=$sz; fi; "
             f"sleep {ANC_DOWNLOAD_PROGRESS_INTERVAL}; done; "
             f"wait $anc_pid; "
             # Echo the "Log directory:" line (used to locate artifacts) and any
