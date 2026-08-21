@@ -383,6 +383,11 @@ def resolve_test_config_placeholders(config_dict, cluster_dict):
       - {home}: Replaced with home directory of the user
       - {home-mount-dir}: Replaced with home mount directory name from cluster_dict
       - {node-dir-name}: Replaced with node directory name from cluster_dict
+      - {run_dir}: Replaced with this run's directory, resolved by RunLayout when
+        the suite is launched through `cvs run`. Only substituted
+        within the dictionary passed here: a {run_dir} in a cluster file, or in a
+        config subsection the caller never resolves, is left untouched rather than
+        reported, since neither goes through this function.
 
     Args:
       config_dict: Configuration dictionary (can be nested dict/list/str)
@@ -412,6 +417,19 @@ def resolve_test_config_placeholders(config_dict, cluster_dict):
     # Get home directory
     home_dir = os.path.expanduser(f'~{username}')
 
+    # Only reached when the config actually asks for it: roughly half the test
+    # modules call this resolver and most of their configs never mention {run_dir},
+    # and RunLayout.get() creates directories.
+    run_dir = ''
+    if '{run_dir}' in json.dumps(config_dict, default=str):
+        # Imported here rather than at module level: cvs.core.run_layout pulls in
+        # cvs/core/__init__.py, whose orchestrator factory reaches
+        # cvs/core/orchestrators/baremetal.py, which imports this module back. By
+        # call time everything is imported and the cycle is gone.
+        from cvs.core.run_layout import RunLayout
+
+        run_dir = str(RunLayout.get().run_dir)
+
     log.info(
         f'Resolving config path placeholders with username: {username}, home: {home_dir}, home_mount_dir: {home_mount_dir_name}'
     )
@@ -423,6 +441,7 @@ def resolve_test_config_placeholders(config_dict, cluster_dict):
         '{home}': home_dir,
         '{home-mount-dir}': home_mount_dir_name,
         '{node-dir-name}': node_dir_name,
+        '{run_dir}': run_dir,
     }
 
     resolved_config = _resolve_placeholders_in_dict(config_dict, replacements, context_name="test config")
